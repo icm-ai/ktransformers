@@ -1,0 +1,68 @@
+# Stage 1: Build the application
+FROM pytorch/pytorch:2.5.1-cuda12.8-cudnn9-devel as builder
+
+# Set working directory
+WORKDIR /workspace
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    cmake \
+    gcc \
+    g++ \
+    libtbb-dev \
+    libssl-dev \
+    libcurl4-openssl-dev \
+    libaio1 \
+    libaio-dev \
+    libfmt-dev \
+    libgflags-dev \
+    zlib1g-dev \
+    patchelf && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy the application source code
+COPY . .
+
+# Update submodules
+RUN git submodule update --init --recursive
+
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir -r requirements-local_chat.txt
+RUN pip install --no-cache-dir -r ktransformers/server/requirements.txt
+RUN pip install --no-cache-dir ninja pyproject-hooks cpufeature aiohttp zmq openai
+
+# Build ktransformers
+RUN CPU_INSTRUCT=NATIVE \
+    USE_BALANCE_SERVE=1 \
+    USE_NUMA=1 \
+    KTRANSFORMERS_FORCE_BUILD=TRUE \
+    TORCH_CUDA_ARCH_LIST="8.0;8.6;8.7;8.9;9.0+PTX" \
+    pip install --no-cache-dir . --no-build-isolation --verbose
+
+# Stage 2: Create the runtime image
+FROM pytorch/pytorch:2.5.1-cuda12.8-cudnn9-runtime
+
+# Set working directory
+WORKDIR /workspace
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libtbb2 \
+    libssl3 \
+    libcurl4 \
+    libaio1 \
+    libfmt9 \
+    libgflags2.2 \
+    zlib1g && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy the installed application from the builder stage
+COPY --from=builder /opt/conda/lib/python3.12/site-packages/ /opt/conda/lib/python3.12/site-packages/
+COPY --from=builder /workspace/ktransformers /workspace/ktransformers
+COPY --from=builder /usr/local/lib/libbalance_serve.so /usr/local/lib/
+COPY --from=builder /usr/local/lib/libcpuinfer_ext.so /usr/local/lib/
+
+# Set the entrypoint
+ENTRYPOINT ["tail", "-f", "/dev/null"]

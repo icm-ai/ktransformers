@@ -28,7 +28,7 @@ RUN apt install -y --no-install-recommends \
     g++ \
     cmake
 # 拷贝代码
-RUN git clone https://github.com/kvcache-ai/ktransformers.git 
+COPY . .
 # 清理 apt 缓存
 RUN rm -rf /var/lib/apt/lists/*
 
@@ -49,6 +49,7 @@ RUN pip install flash-attn
 # 安装 ktransformers 本体（含编译）
 RUN CPU_INSTRUCT=${CPU_INSTRUCT} \
     USE_BALANCE_SERVE=1 \
+    USE_NUMA=1 \
     KTRANSFORMERS_FORCE_BUILD=TRUE \
     TORCH_CUDA_ARCH_LIST="8.0;8.6;8.7;8.9;9.0+PTX" \
     pip install . --no-build-isolation --verbose
