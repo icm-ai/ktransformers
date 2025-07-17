@@ -1,5 +1,8 @@
 # Stage 1: Build the application
-FROM pytorch/pytorch:2.5.1-cuda12.8-cudnn9-devel as builder
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel AS builder
+
+ARG http_proxy
+ARG https_proxy
 
 # Set working directory
 WORKDIR /workspace
@@ -18,13 +21,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfmt-dev \
     libgflags-dev \
     zlib1g-dev \
-    patchelf && \
+    patchelf \
+    numactl \
+    libnuma-dev \
+    pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
 # Clone the application source code
-RUN git clone https://github.com/kvcache-ai/ktransformers.git .
+RUN git clone --depth=1 https://github.com/kvcache-ai/ktransformers.git .
 
 # Update submodules
+
+# Fix Git ownership issue
+RUN git config --global --add safe.directory /workspace
+
 RUN git submodule update --init --recursive
 
 # Install Python dependencies
@@ -42,21 +52,21 @@ RUN CPU_INSTRUCT=NATIVE \
     pip install --no-cache-dir . --no-build-isolation --verbose
 
 # Stage 2: Create the runtime image
-FROM pytorch/pytorch:2.5.1-cuda12.8-cudnn9-runtime
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime AS runtime
 
 # Set working directory
 WORKDIR /workspace
 
-# Install runtime dependencies
+# Install runtime dependencies - 修复libfmt包名问题
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libtbb2 \
     libssl3 \
     libcurl4 \
     libaio1 \
-    # TODO: Find the correct runtime package for libfmt
-    libfmt-dev \
+    libfmt8 \
     libgflags2.2 \
-    zlib1g && \
+    zlib1g \
+    numactl && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the installed application from the builder stage
@@ -64,6 +74,17 @@ COPY --from=builder /opt/conda/lib/python3.12/site-packages/ /opt/conda/lib/pyth
 COPY --from=builder /workspace/ktransformers /workspace/ktransformers
 COPY --from=builder /usr/local/lib/libbalance_serve.so /usr/local/lib/
 COPY --from=builder /usr/local/lib/libcpuinfer_ext.so /usr/local/lib/
+
+# Create necessary directories and set permissions
+RUN mkdir -p /workspace/models /workspace/logs && \
+    chmod 755 /workspace/models /workspace/logs
+
+# # Set environment variables
+# ENV PYTHONPATH=/workspace:$PYTHONPATH
+# ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
+# # Expose ports for API and web interface
+# EXPOSE 8000 8001
 
 # Set the entrypoint
 ENTRYPOINT ["tail", "-f", "/dev/null"]
