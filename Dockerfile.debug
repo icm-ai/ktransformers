@@ -30,8 +30,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Clone the application source code
 RUN git clone --depth=1 https://github.com/kvcache-ai/ktransformers.git .
 
-# Update submodules
-
 # Fix Git ownership issue
 RUN git config --global --add safe.directory /workspace
 
@@ -51,13 +49,19 @@ RUN CPU_INSTRUCT=NATIVE \
     TORCH_CUDA_ARCH_LIST="8.0;8.6;8.7;8.9;9.0+PTX" \
     pip install --no-cache-dir . --no-build-isolation --verbose
 
+# Check what was actually built and find the custom libraries
+RUN echo "=== Checking Python version ===" && python --version
+RUN echo "=== Searching for ktransformers installation ===" && find /opt/conda -name "ktransformers*" -type d
+RUN echo "=== Searching for custom libraries ===" && find /workspace -name "*.so" -type f
+RUN echo "=== Searching for libraries in build directory ===" && find /workspace -name "libbalance_serve.so" -o -name "libcpuinfer_ext.so" 2>/dev/null || echo "Custom libraries not found in workspace"
+
 # Stage 2: Create the runtime image
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime AS runtime
 
 # Set working directory
 WORKDIR /workspace
 
-# Install runtime dependencies - 修复libfmt包名问题
+# Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libtbb2 \
     libssl3 \
@@ -69,22 +73,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     numactl && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy the installed application from the builder stage
-COPY --from=builder /opt/conda/lib/python3.12/site-packages/ /opt/conda/lib/python3.12/site-packages/
+# Get the actual Python version from the builder
+COPY --from=builder /opt/conda/bin/python /tmp/python_check
+RUN PYTHON_VERSION=$(/tmp/python_check -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')") && \
+    echo "Python version: $PYTHON_VERSION" && \
+    rm /tmp/python_check
+
+# Copy the installed Python packages (use Python 3.11 based on your findings)
+COPY --from=builder /opt/conda/lib/python3.11/site-packages/ /opt/conda/lib/python3.11/site-packages/
+
+# Copy the source code and any built artifacts
 COPY --from=builder /workspace/ktransformers /workspace/ktransformers
-COPY --from=builder /usr/local/lib/libbalance_serve.so /usr/local/lib/
-COPY --from=builder /usr/local/lib/libcpuinfer_ext.so /usr/local/lib/
+
+# Copy all the custom libraries from the build directory
+COPY --from=builder /workspace/build/lib.linux-x86_64-cpython-311/ /usr/local/lib/ktransformers/
+
+# Copy PhotonLibOS library
+COPY --from=builder /workspace/csrc/balance_serve/build/third_party/PhotonLibOS/output/libphoton.so /usr/local/lib/
+
+# Copy the entire build directory structure to preserve any additional dependencies
+COPY --from=builder /workspace/build /workspace/build
 
 # Create necessary directories and set permissions
-RUN mkdir -p /workspace/models /workspace/logs && \
-    chmod 755 /workspace/models /workspace/logs
+RUN mkdir -p /workspace/models /workspace/logs /usr/local/lib/ktransformers && \
+    chmod 755 /workspace/models /workspace/logs /usr/local/lib/ktransformers
 
-# # Set environment variables
-# ENV PYTHONPATH=/workspace:$PYTHONPATH
-# ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+# Set environment variables
+ENV PYTHONPATH=/workspace:$PYTHONPATH
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/ktransformers:$LD_LIBRARY_PATH
 
-# # Expose ports for API and web interface
-# EXPOSE 8000 8001
+# Expose ports for API and web interface
+EXPOSE 8000 8001
 
-# Set the entrypoint
-ENTRYPOINT ["tail", "-f", "/dev/null"]
+# Set the default command (can be overridden)
+CMD ["tail", "-f", "/dev/null"]
